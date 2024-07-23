@@ -1,0 +1,520 @@
+---
+title: "Bank Marketing Analysis"
+theme: readable
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    fig_width: 12
+    fig_height: 7
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+The dataset analyzed in this project can be found at the following link:
+https://archive.ics.uci.edu/dataset/222/bank+marketing
+
+Importing the libraries that are used in this project
+
+```{r}
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(tree)
+library(ISLR)
+library(stringr)
+library(MASS)
+library(randomForest)
+library(gbm)
+library(ROSE)
+library(gmodels)
+library(imbalance)
+library(themis)
+library(ranger)
+library(caret)
+library(parallel)
+library(doParallel)
+library(pROC)
+
+```
+
+Data preprocessing
+
+```{r}
+
+get_mode <- function(v) {
+  v <- v[nchar(as.character(v))>0]
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+```
+
+Feature scaling is not used in a random forest, which is the model I ended up opting for, so it was not performed. The random forest model is also very robust, so some outliers were not removed. 
+
+Also, it is important to note that the duration feature was not included in the models. As stated by in the original source of the dataset, the duration feature has a high correlation with the final outcome (the y feature); however, the duration of the call is not known until after a call is made, which takes away the purpose of the model to predict who will subscribe. This is because after the call is made the value of y is known. This model hopes to make predictions before calls are made, so duration is ignored in models for classifying y. 
+
+The euribor3m variable refers to the 3-month Euribor (Euro Interbank Offered Rate) interest rate. This is the interest rate at which a group of European banks lend money to each other.
+
+It is also important to note that the job feature was changed from specifying a specific job to instead only specifying the current employment state of the individual (unemployed, student, employed, or retired).
+
+```{r}
+
+working_directory <- "~/Data Science R Course/Final Project"
+setwd(working_directory)
+bank <- read.csv("bank-additional-full.csv", na.strings = c("unknown", "none"))
+# bank <- bank[bank$previous == 0,]
+bank <- bank[c(1:8, 10:12, 14:21)]
+
+summary(bank$education)
+
+# Observations that had NAs in these features were removed because there weren't many with NAs in these
+bank <- bank %>% drop_na(job, marital)
+
+# "unknown" is a factor option for default because a customer providing information about having credit in default is up to them to decide to share, and there might be a a statistical difference in people who do share the information and people who do not share it
+# The reason for the outliers that have given a yes response might be because people who do have credit default in their account are unwilling to share that information, and only a few disclosed that
+bank$default <- ifelse(is.na(bank$default), "unknown", bank$default)
+bank$default <- factor(bank$default, levels = c("no", "yes", "unknown"))
+bank$default <- factor(unclass(bank$default))
+
+# Setting up the rest of the variables and just making sure they are the proper types
+bank$housing <- factor(ifelse(bank$housing == "yes", 1, 0))
+bank$y <- factor(ifelse(bank$y == "yes", 1, 0))
+bank$loan <- factor(ifelse(bank$loan == "yes", 1, 0))
+
+# Changing the job factor
+bank$job <- factor(ifelse(bank$job == "unemployed" | bank$job == "retired" | bank$job == "student", bank$job, "employed"))
+bank$job <- factor(bank$job, levels = c("unemployed", "student", "employed", "retired"))
+bank$job <- factor(unclass(bank$job))
+
+bank$marital <- factor(bank$marital, levels = c("single", "married", "divorced"))
+bank$marital <- factor(unclass(bank$marital))
+
+bank$education <- factor(bank$education, levels = c("illiterate" ,"basic.4y", "basic.6y", "basic.9y", "high.school", "professional.course", "university.degree"))
+bank$education <- factor(unclass(bank$education))
+
+bank$education <- replace(bank$education, is.na(bank$education), factor(get_mode(bank$education)))
+bank$housing <- replace(bank$housing, is.na(bank$housing), factor(get_mode(bank$housing)))
+bank$loan <- replace(bank$loan, is.na(bank$loan), factor(get_mode(bank$loan)))
+
+bank$contact <- as.factor(bank$contact)
+bank$contact <- factor(unclass(bank$contact))
+
+bank$day_of_week <- factor(bank$day_of_week, levels = c("mon", "tue", "wed", "thu", "fri"))
+bank$day_of_week <- factor(unclass(bank$day_of_week))
+
+bank$campaign <- factor(bank$campaign)
+
+bank$previous <- factor(bank$previous)
+bank$poutcome <- factor(bank$poutcome, levels = c("nonexistent", "failure", "success"))
+bank$poutcome <- factor(unclass(bank$poutcome) - 2)
+summary(bank$poutcome)
+
+summary(bank$age)
+
+summary(bank$default)
+
+```
+
+Oversampling the minority class (in this case, when y = 1). I did this to test out the oversampling feature and the affect it had on the dataset.
+
+```{r}
+
+# sampled_bank = ovun.sample(y ~ ., data = bank, method = "over", N = 60000)
+sampled_bank <- ovun.sample(y ~ ., data = bank, method = "both")
+sampled_bank <- sampled_bank$data
+summary(sampled_bank)
+
+```
+
+Exploratory data analysis
+
+As seen in the summary, there was a pretty high variation in the employment variation rate. This is because some of the data was collected during the Great Recession when unemployment was high worldwide. This is good as it allows us to further explore the relationship between the current state in the economy to the success of bank marketing campaigns.
+
+For the same reason, there is a very low consumer confidence index during the collection of this data. However, the relatively high variation in this field may help us study how this indicator affects the success of bank marketing campaigns.
+
+As seen in the distribution of y, there are not many yes responses compared to no responses. This highlights how the data in imbalanced and needs sampling and other tools to compensate. 
+
+There is a very low amount of yes in default. As explained before, this is probably because people with a yes in this category would be unwilling to disclose that information. 
+
+```{r}
+
+summary(bank)
+head(bank)
+
+print("Employment variation rate summary: ")
+summary(bank$emp.var.rate)
+print("Consumer confidence index summary: ")
+summary(bank$cons.conf.idx)
+print("Y summary: ")
+summary(bank$y)
+print("Default summary: ")
+summary(bank$default)
+
+```
+
+Using some visualizations to see the distribution of some variables.
+
+```{r}
+
+boxplot(bank$emp.var.rate, ylab="Distribution of the employment variation rate")
+boxplot(bank$age, ylab="Distribution of the age")
+boxplot(bank$cons.price.idx, ylab="Distribution of the consumer price index")
+boxplot(bank$cons.conf.idx, ylab="Distribution of the consumer confidence index")
+boxplot(bank$euribor3m, ylab="Distribution of the 3 months Euribor rate")
+boxplot(bank$nr.employed, ylab="Distribution of the number employed")
+
+# Huge amount of unknown, very few for "yes", indicates a lot of people do not want to disclose the information
+barplot(summary(bank$default))
+barplot(summary(bank$education))
+barplot(summary(bank$job))
+barplot(summary(bank$marital))
+barplot(summary(bank$loan))
+barplot(summary(bank$day_of_week))
+barplot(summary(bank$campaign)) # Some people didn't give a yes or no response for a long time (up to 56 contacts), might be linked to final response
+
+```
+
+Using some graphs to try to visualize the correlation of some of the variables.
+
+```{r}
+
+ggplot(bank, (aes(x=cons.price.idx, y=cons.conf.idx))) +
+  stat_binhex(colour="white") +
+  theme_bw() +
+  scale_fill_gradient(low="white", high="black") +
+  labs(x="Consumer price index", y="Consumer confidence index")
+
+ggplot(bank, (aes(x=duration, y=age))) +
+  stat_binhex(colour="white") +
+  theme_bw() +
+  scale_fill_gradient(low="white", high="black") +
+  labs(x="Duration", y="Age")
+
+ggplot(bank, aes(duration, age)) +
+  geom_point(aes(alpha = (unclass(y) - 1) * 0.2)) + 
+  theme_bw() +
+  labs(x = "Duration", y = "Age")
+
+plot(bank$duration, bank$nr.employed)
+
+```
+
+```{r}
+
+chi_test <- table(bank$job, bank$education)
+print(chi_test) # Variables seem to be related, but not so much that there is multicollinearity created
+print(chisq.test(chi_test))
+
+chi_test <- table(bank$y, bank$education)
+print(chi_test) # Ratio for yes response seems to be positively correlated with education
+print(chisq.test(chi_test))
+
+283 / 3358
+145 / 1862
+360 / 4913
+707 / 7352
+381 / 4161
+1235 / 10444
+
+chi_test <- table(bank$y, bank$poutcome)
+print(chi_test) # Previous outcome seems to be largely positively related to y
+print(chisq.test(chi_test))
+
+chi_test <- table(bank$y, bank$previous)
+print(chi_test) # Previous number of contact also seems to be largely positively related to y
+print(chisq.test(chi_test))
+
+chi_test <- table(bank$marital, bank$housing)
+print(chi_test) # Higher p-value, probably the small difference is due to random chance
+print(chisq.test(chi_test))
+
+chi_test <- table(bank$y, bank$campaign)
+print(chi_test) # From 18 contacts and onwards, there were no yes responses, however there were also very few people who were contacted that many times. However, the relationship still shows a negative correlation between campaign and a "yes" response
+print(chisq.test(chi_test))
+
+1473 / 13162
+792 / 8128
+408 / 4319
+186 / 2173
+95 / 1351
+59 / 802
+33 / 542
+16 / 347
+
+```
+
+In the end, I decided to use a random forest model. This is because random forests are good at dealing with imbalanced data, and also have the feature of assigning class weights to help deal with imbalanced datasets, too. I started out with trying tree models, and then moved into using random forests. These models are also more robust, which seems like a necessary feature for this specific dataset. Also, the correlation coefficients for basically all of the variables and y seem to be very low in regression models (as shown in the following code chunk).
+
+Note: In this project, predicting the one value for y is more important than predicting the zero value, because it is more important to a bank to identify possible customers rather than people who would not become customers.
+
+```{r}
+
+set.seed(2)
+
+nbank_pred_sample <- sample(nrow(bank), size = floor(0.7 * nrow(bank)), replace = FALSE)
+train <- bank[nbank_pred_sample, ]
+test <-  bank[-nbank_pred_sample, ]
+
+train = (ovun.sample(y ~ ., data = train, method = "over", N = 30000))$data
+
+logisticreg <- glm(y ~ duration, data = train, family = "binomial")
+summary(logisticreg)
+
+# Calculating R-Squared
+deviance <- summary(logisticreg)$deviance
+null_deviance <- summary(logisticreg)$null.deviance
+rsquared <- 1 - (deviance / null_deviance)
+
+print("R-squared value of y ~ duration: ")
+print(rsquared) # R-squared value is very low, logistic regression might not be the best way
+
+test_predictions <- predict(logisticreg, test, type = "response")
+test_predictions <- ifelse(test_predictions > 0.5, 1, 0)
+CrossTable(test$y, test_predictions)
+
+```
+
+Trying out tree models
+
+NOTE: This is older code, using sampled_bank. I realized that bank should be used and train should be sampled separately from the entire dataset to avoid duplicate observations in the test dataset too.
+
+```{r}
+
+# Try sampling (oversampling minority class), class weighting, random forest or bagging are good with resampling techniques
+# Search up handling imbalanced data
+
+sampled_bank$y <- factor(sampled_bank$y)
+bank$y <- factor(bank$y)
+
+set.seed(2)
+
+bank_pred_sample <- sample(nrow(sampled_bank), size = floor(0.7 * nrow(sampled_bank)), replace = FALSE)
+train <- sampled_bank[bank_pred_sample, ]
+test <-  sampled_bank[-bank_pred_sample, ]
+
+# ttree <- tree(y ~ . -duration, data = train)
+# ttree <- tree(y ~ job + education + default + loan + nr.employed + euribor3m + emp.var.rate, data = train)
+ttree <- tree(y ~ . -duration -nr.employed -euribor3m -emp.var.rate -cons.price.idx -cons.conf.idx, data = train)
+summary(ttree)
+
+# Make predictions and display confusion matrix
+test_predictions <- predict(ttree, test, type = "class")
+CrossTable(test$y, test_predictions)
+
+# plot(ttree)
+# text(ttree, pretty = 0, cex = .65, digits = 1)
+
+```
+
+Attempting to sample training data separately from sampling the overall data. This is because I realized that when you oversample before making a train and test split, then the test data would get some observations that are exactly the same as those in the train data because they were duplicated during oversampling. So, I must instead sample the train set by itself to make sure there are not duplicates in the test dataset.
+
+```{r}
+
+set.seed(2)
+
+bank$campaign <- unclass(bank$campaign)
+
+nbank_pred_sample <- sample(nrow(bank), size = floor(0.7 * nrow(bank)), replace = FALSE)
+train <- bank[nbank_pred_sample, ]
+test <-  bank[-nbank_pred_sample, ]
+
+train = ovun.sample(y ~ . -duration, data = train, method = "both", N = 30000)
+train = train$data
+summary(train$y)
+
+#test = ovun.sample(y ~ ., data = test, method = "over", N = 18000)
+#test = test$data
+summary(test$y)
+
+train$campaign <- unclass(train$campaign)
+test$campaign <- unclass(test$campaign)
+
+class(train$campaign)
+ttree <- tree(y ~ . -duration, data = train)
+summary(ttree)
+
+# Make predictions and display confusion matrix
+test_predictions <- predict(ttree, test, type = "class")
+CrossTable(test$y, test_predictions)
+confusionMatrix(test_predictions, test$y)
+
+bank$campaign <- factor(bank$campaign)
+
+# plot(ttree)
+# text(ttree, pretty = 0, cex = .65, digits = 1)
+
+```
+
+Trying out random forests
+
+```{r}
+
+bag <- randomForest(y ~ . -duration, data = train, importance = TRUE) 
+bag
+
+test_predictions <- predict(bag, test, type = "class")
+
+CrossTable(test$y, test_predictions)
+importance(bag)
+
+summary(test$y)
+summary(train$y)
+
+varImpPlot(bag)
+
+```
+
+```{r}
+
+test_predictions <- predict(bag, bank, type = "class")
+CrossTable(bank$y, test_predictions)
+
+```
+
+Trying to create a random forest when only oversampling the training set. After experimenting a bit here, I also found that an mtry value of 2 seems to work well, and a split of under- and oversampling data also seems effective. Calculating weights has had some mixed results, allowing for higher accuracy in finding "1" but much lower accuracy in finding "0". There are multiple commented out procedures that I tested for sampling.
+
+```{r}
+
+calculate_weights <- function(data) {
+  class_counts <- table(data$y)
+  total_samples <- sum(class_counts)
+  num_classes <- length(class_counts)
+  class_weights <- total_samples / (num_classes * class_counts)
+  names(class_weights) <- levels(data$y)
+  class_weights
+}
+
+```
+
+```{r}
+
+set.seed(2)
+
+nbank_pred_sample <- sample(nrow(bank), size = floor(0.7 * nrow(bank)), replace = FALSE)
+# nbank_pred_sample <- sample(nrow(bank), size = 20000, replace = FALSE)
+train <- bank[nbank_pred_sample, ]
+test <-  bank[-nbank_pred_sample, ]
+summary(train$y)
+
+train <- (ovun.sample(y ~ ., data = train, method = "over", N = 30000))$data
+# train <- (ovun.sample(y ~ ., data = train, method = "under", N = 20000))$data
+# train <- (ovun.sample(y ~ ., data = train, method = "over", N = 25000))$data
+# train <- ROSE(y ~ ., train)$data
+# train <- smotenc(train, var = "y")
+# train <- mwmote(train, numInstances = 10000, classAttr = "y")
+
+wt <- calculate_weights(train)
+
+bag <- randomForest(y ~ . -duration, data = train, importance = TRUE, classwt = wt) 
+bag
+
+test_predictions <- predict(bag, test, type = "class")
+
+CrossTable(test$y, test_predictions)
+confusionMatrix(test_predictions, test$y, mode = "everything")
+importance(bag)
+
+summary(test$y)
+summary(train$y)
+
+varImpPlot(bag)
+
+```
+
+Trying out using repeated k-folds validation to create a better model. 
+
+```{r}
+
+repeat_cv <- trainControl(method='repeatedcv', number=5, repeats=3)
+
+forest <- train(y ~ . -duration, data = train, method = "rf", trControl = repeat_cv, metric = "Accuracy", classwt = wt)
+
+test_predictions <- data.frame(actual = test$y, predict(forest, newdata = test, type = "prob"))
+test_predictions$predict <- ifelse(unclass(test_predictions$X0) > 0.5, "1", "0")
+
+test_predictions$predict <- as.factor(test_predictions$predict)
+summary(test_predictions$predict)
+
+confusionMatrix(test_predictions$predict, test$y)
+CrossTable(test$y, test_predictions$predict)
+importance(forest)
+
+varImpPlot(forest)
+
+summary(bank$y)
+
+```
+
+Tuning for a final model. Out of the mtrys attempted, 2 did the best. The weights were also fine tuned. It was also found that performing sampling before the repeated cv was detrimental, and instead undersampling was performed as part of the training function. This seemed to yeild the best results compared to oversampling or ROSE sampling.
+
+############################################################
+Final Model:
+############################################################
+
+```{r}
+
+set.seed(2)
+
+bank$campaign <- factor(bank$campaign)
+nbank_pred_sample <- sample(nrow(bank), size = floor(0.7 * nrow(bank)), replace = FALSE)
+
+train <- bank[nbank_pred_sample, ]
+test <-  bank[-nbank_pred_sample, ]
+
+# train <- (ovun.sample(y ~ ., data = train, method = "over", N = 30000))$data
+
+wt <- calculate_weights(train)
+wt[[2]] <- 1.2
+wt[[1]] <- 1.25
+
+tunegrid <- expand.grid(.mtry=2:4)
+
+repeat_cv <- trainControl(method = "repeatedcv", number = 10, repeats = 3, verboseIter = FALSE, sampling = c("down", "up"), allowParallel = TRUE)
+# forest <- caret::train(y ~ . -duration, data = train, method = "rf", trControl = repeat_cv, metric = "Accuracy", tuneGrid = tunegrid, importance = TRUE, classwt = wt)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+system.time(forest <- caret::train(y ~ . -duration, data = train, method = "rf", trControl = repeat_cv, metric = "Accuracy", tuneGrid = tunegrid, importance = TRUE, classwt = wt))
+stopCluster(cluster)
+registerDoSEQ()
+
+test_predictions <- predict(forest, newdata = test)
+summary(test_predictions)
+
+CrossTable(test$y, test_predictions)
+caret::confusionMatrix(test_predictions, test$y, mode = "everything") # This shows us many important metrics such as accuracy, precision, F1, etc.
+
+importance(forest)
+
+varImpPlot(forest$finalModel)
+
+```
+
+Creating a ROC AUC curve to evaluate the model using the probability predictions of the model.
+
+```{r}
+
+test_predictions <- data.frame(actual = test$y, predict(forest, newdata = test, type = "prob"))
+test_predictions$predict <- ifelse(unclass(test_predictions$X0) >= 0.5, "0", "1")
+test_predictions$
+
+test_predictions$predict <- as.factor(test_predictions$predict)
+summary(test_predictions$predict)
+
+# confusionMatrix(test_predictions$predict, test$y)
+CrossTable(test$y, test_predictions$predict)
+
+roc_object <- roc(unclass(test$y), as.numeric(test_predictions$X0), plot = TRUE, print.auc = TRUE)
+ 
+# calculate area under curve
+auc(roc_object)
+
+```
+
+#############################################################################################
+IMPORTANT:
+Interpretation and more information on the model is recorded on the slides presentation submitted to Canvas.
+#############################################################################################
