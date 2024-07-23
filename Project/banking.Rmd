@@ -63,7 +63,7 @@ It is also important to note that the job feature was changed from specifying a 
 
 ```{r}
 
-working_directory <- "~/Data Science R Course/Final Project"
+working_directory <- "~/Data Science R Course/Final Project/Project"
 setwd(working_directory)
 bank <- read.csv("bank-additional-full.csv", na.strings = c("unknown", "none"))
 # bank <- bank[bank$previous == 0,]
